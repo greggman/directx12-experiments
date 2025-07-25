@@ -21,10 +21,10 @@ if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\B
 )
 
 echo Compiling with Visual Studio compiler...
-cl.exe textured_triangle_dx12.cpp /Fe:textured_triangle_dx12.exe /EHsc /I"%WindowsSdkDir%Include\%WindowsSDKVersion%\um" /I"%WindowsSdkDir%Include\%WindowsSDKVersion%\shared" /link user32.lib gdi32.lib /SUBSYSTEM:CONSOLE
+cl.exe main.cpp /Fe:main.exe /EHsc /I"%WindowsSdkDir%Include\%WindowsSDKVersion%\um" /I"%WindowsSdkDir%Include\%WindowsSDKVersion%\shared" /link user32.lib gdi32.lib /SUBSYSTEM:CONSOLE
 
 if %ERRORLEVEL% EQU 0 (
-    echo Build successful! Run textured_triangle_dx12.exe to see the textured triangle.
+    echo Build successful! Run main.exe to see the textured triangle.
 ) else (
     echo Build failed.
     goto :error
@@ -34,7 +34,7 @@ goto :end
 :error
 echo.
 echo Alternative: Run from Visual Studio Developer Command Prompt and use:
-echo cl.exe textured_triangle_dx12.cpp /Fe:textured_triangle_dx12.exe /EHsc
+echo cl.exe main.cpp /Fe:main.exe /EHsc
 echo.
 
 :end
