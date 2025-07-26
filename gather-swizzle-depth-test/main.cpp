@@ -345,7 +345,7 @@ public:
             sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
             sampler.MipLODBias = 0;
             sampler.MaxAnisotropy = 0;
-            sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS;
+            sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS; // Will be updated dynamically
             sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
             sampler.MinLOD = 0.0f;
             sampler.MaxLOD = D3D12_FLOAT32_MAX;
@@ -576,11 +576,83 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         m_device->CreateUnorderedAccessView(m_resultBuffer.Get(), nullptr, &uavDesc, uavHandle);
     }
     
-    void ExecuteGather() {
+    void UpdateShaderResourceViewSwizzle(UINT swizzleR, UINT swizzleG, UINT swizzleB, UINT swizzleA) {
+        // Create shader resource view for depth texture with custom swizzle
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(swizzleR, swizzleG, swizzleB, swizzleA);
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT; // Read as float in shader
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+        
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = m_srvUavHeap->GetCPUDescriptorHandleForHeapStart();
+        m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, srvHandle);
+    }
+    
+    ComPtr<ID3D12RootSignature> CreateRootSignatureWithComparison(D3D12_COMPARISON_FUNC comparisonFunc) {
+        D3D12_DESCRIPTOR_RANGE ranges[2];
+        // Texture SRV
+        ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        ranges[0].NumDescriptors = 1;
+        ranges[0].BaseShaderRegister = 0;
+        ranges[0].RegisterSpace = 0;
+        ranges[0].OffsetInDescriptorsFromTableStart = 0;
+        
+        // Buffer UAV
+        ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        ranges[1].NumDescriptors = 1;
+        ranges[1].BaseShaderRegister = 0;
+        ranges[1].RegisterSpace = 0;
+        ranges[1].OffsetInDescriptorsFromTableStart = 1;
+        
+        D3D12_ROOT_PARAMETER rootParameters[1];
+        rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParameters[0].DescriptorTable.NumDescriptorRanges = 2;
+        rootParameters[0].DescriptorTable.pDescriptorRanges = ranges;
+        
+        D3D12_STATIC_SAMPLER_DESC sampler = {};
+        sampler.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler.MipLODBias = 0;
+        sampler.MaxAnisotropy = 0;
+        sampler.ComparisonFunc = comparisonFunc;
+        sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+        sampler.MinLOD = 0.0f;
+        sampler.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler.ShaderRegister = 0;
+        sampler.RegisterSpace = 0;
+        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        
+        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc;
+        rootSignatureDesc.NumParameters = 1;
+        rootSignatureDesc.pParameters = rootParameters;
+        rootSignatureDesc.NumStaticSamplers = 1;
+        rootSignatureDesc.pStaticSamplers = &sampler;
+        rootSignatureDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+        
+        ComPtr<ID3DBlob> signature;
+        ComPtr<ID3DBlob> error;
+        ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1_0, &signature, &error));
+        
+        ComPtr<ID3D12RootSignature> rootSignature;
+        ThrowIfFailed(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&rootSignature)));
+        
+        return rootSignature;
+    }
+    
+    void ExecuteGather(D3D12_COMPARISON_FUNC comparisonFunc, UINT swizzleR, UINT swizzleG, UINT swizzleB, UINT swizzleA) {
+        // Create root signature with the specified comparison function
+        ComPtr<ID3D12RootSignature> currentRootSignature = CreateRootSignatureWithComparison(comparisonFunc);
+        
+        // Update the SRV with the specified swizzle
+        UpdateShaderResourceViewSwizzle(swizzleR, swizzleG, swizzleB, swizzleA);
+        
         ThrowIfFailed(m_commandAllocator->Reset());
         ThrowIfFailed(m_commandList->Reset(m_commandAllocator.Get(), m_computePipelineState.Get()));
         
-        m_commandList->SetComputeRootSignature(m_rootSignature.Get());
+        m_commandList->SetComputeRootSignature(currentRootSignature.Get());
         
         ID3D12DescriptorHeap* ppHeaps[] = { m_srvUavHeap.Get() };
         m_commandList->SetDescriptorHeaps(_countof(ppHeaps), ppHeaps);
@@ -602,18 +674,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         WaitForCompletion();
     }
     
-    void ReadResults() {
+    void ReadResults(const std::string& swizzleDesc) {
         // Map the readback buffer to read the results
         float* pData = nullptr;
         CD3DX12_RANGE readRange(0, sizeof(float) * 4);
         ThrowIfFailed(m_readbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pData)));
         
-        std::cout << std::fixed << std::setprecision(6);
-        std::cout << "GatherCmp results from depth texture at (0.5, 0.5) with reference 0.5:" << std::endl;
-        std::cout << "Value 0 (comparison result): " << pData[0] << std::endl;
-        std::cout << "Value 1 (comparison result): " << pData[1] << std::endl;
-        std::cout << "Value 2 (comparison result): " << pData[2] << std::endl;
-        std::cout << "Value 3 (comparison result): " << pData[3] << std::endl;
+        std::cout << std::fixed << std::setprecision(1);
+        std::cout << pData[0] << " " << pData[1] << " " << pData[2] << " " << pData[3] << " - " << swizzleDesc << std::endl;
         
         m_readbackBuffer->Unmap(0, nullptr);
     }
@@ -689,19 +757,76 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPara
 }
 
 int main() {
-    std::cout << "Starting DirectX 12 Texture Gather Test..." << std::endl;
+    std::cout << "Starting DirectX 12 Texture Gather Swizzle Test..." << std::endl;
     
     try {
         DX12TextureGather sample;
         sample.Initialize();
         
-        std::cout << "Executing texture gather operation..." << std::endl;
-        sample.ExecuteGather();
+        // Define comparison functions to test
+        struct ComparisonTest {
+            D3D12_COMPARISON_FUNC func;
+            const char* name;
+        };
         
-        std::cout << "Reading results..." << std::endl;
-        sample.ReadResults();
+        ComparisonTest comparisons[] = {
+            { D3D12_COMPARISON_FUNC_LESS, "LESS" },
+            { D3D12_COMPARISON_FUNC_GREATER, "GREATER" }
+        };
         
-        std::cout << "Program completed successfully!" << std::endl;
+        // Define swizzle settings to test
+        struct SwizzleTest {
+            UINT r, g, b, a;
+            const char* description;
+        };
+        
+        SwizzleTest swizzles[] = {
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, "default" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1, "one one one one" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, "zero zero zero zero" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, "r r r r" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, "g g g g" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, "b b b b" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, "a a a a" },
+            { D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_3, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_2, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_1, 
+              D3D12_SHADER_COMPONENT_MAPPING_FROM_MEMORY_COMPONENT_0, "a b g r" }
+        };
+        
+        // Outer loop: test different comparison functions
+        for (const auto& comparison : comparisons) {
+            std::cout << "\nComparison mode: " << comparison.name << std::endl;
+            
+            // Inner loop: test different swizzle settings
+            for (const auto& swizzle : swizzles) {
+                sample.ExecuteGather(comparison.func, swizzle.r, swizzle.g, swizzle.b, swizzle.a);
+                sample.ReadResults(swizzle.description);
+            }
+        }
+        
+        std::cout << "\nProgram completed successfully!" << std::endl;
         return 0;
     }
     catch (const std::exception& e) {
