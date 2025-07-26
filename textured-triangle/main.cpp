@@ -859,13 +859,11 @@ int main() {
     catch (const std::exception& e) {
         std::cout << "Error: " << e.what() << std::endl;
         std::cout << "Press any key to continue..." << std::endl;
-        system("pause");
         return -1;
     }
     catch (...) {
         std::cout << "Unknown error occurred!" << std::endl;
         std::cout << "Press any key to continue..." << std::endl;
-        system("pause");
         return -1;
     }
 }
